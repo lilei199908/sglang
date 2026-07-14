@@ -34,6 +34,7 @@ from sglang.srt.multimodal.processors.base_processor import (
 from sglang.srt.multimodal.processors.base_processor import (
     MultimodalSpecialTokens,
 )
+from sglang.srt.utils import cpu_has_amx_support, is_cpu
 from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 from sglang.utils import logger
 
@@ -57,6 +58,23 @@ FRAME_FACTOR = 2
 FPS = 2.0
 FPS_MIN_FRAMES = 4
 FPS_MAX_FRAMES = 768
+
+
+_is_cpu_amx_available = cpu_has_amx_support()
+_is_cpu = is_cpu()
+if _is_cpu and _is_cpu_amx_available:
+    try:
+        import transformers
+
+        from sglang.srt.layers.amx_utils import fast_preprocess_cpu
+
+        transformers.models.qwen2_vl.image_processing_qwen2_vl_fast.Qwen2VLImageProcessorFast._preprocess = (
+            fast_preprocess_cpu
+        )
+    except Exception as e:
+        logger.warning(
+            f"Failed to hack Qwen2VLImageProcessorFast with AMX optimization: {e}"
+        )
 
 
 def smart_resize(
@@ -271,6 +289,11 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         self.audio_start_token_id = getattr(hf_config, "audio_start_token_id", None)
         self.audio_token_id = getattr(hf_config, "audio_token_id", None)
 
+        self._spatial_merge_size = self.hf_config.vision_config.spatial_merge_size
+        self._tokens_per_second = getattr(
+            self.hf_config.vision_config, "tokens_per_second", None
+        )
+
         self.mm_tokens = MultimodalSpecialTokens(
             image_token="<|vision_start|><|image_pad|><|vision_end|>",
             image_token_id=hf_config.image_token_id,
@@ -281,6 +304,10 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             video_token_id=self.VIDEO_TOKEN_ID,
             audio_token_id=self.audio_token_id,
         ).build(_processor)
+
+    @property
+    def spatial_merge_size(self):
+        return self._spatial_merge_size
 
     def build_input_ids_with_timestamps(
         self, prompt, embeddings, img_grid_thw, video_grid_thw, video_timestamps
@@ -293,7 +320,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
 
         img_token_id = getattr(self, "IM_TOKEN_ID", None)
         video_token_id = getattr(self, "VIDEO_TOKEN_ID", None)
-        spatial_merge_size = getattr(self, "spatial_merge_size", 1)
+        spatial_merge_size = self.spatial_merge_size
         vision_start_token_id = getattr(self, "vision_start_token_id", None)
         vision_end_token_id = getattr(self, "vision_end_token_id", None)
 
@@ -383,14 +410,12 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
 
         input_ids_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
         mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
-            spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+            spatial_merge_size=self._spatial_merge_size,
             image_token_id=self.mm_tokens.image_token_id,
             video_token_id=self.mm_tokens.video_token_id,
             vision_start_token_id=self.vision_start_token_id,
             model_type=self.model_type,
-            tokens_per_second=getattr(
-                self.hf_config.vision_config, "tokens_per_second", None
-            ),
+            tokens_per_second=self._tokens_per_second,
             input_ids=input_ids_tensor,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
@@ -456,7 +481,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         if not image_items or len(image_items) != len(mm_items):
             return None
 
-        spatial_merge_size = self.hf_config.vision_config.spatial_merge_size
+        spatial_merge_size = self._spatial_merge_size
         sorted_items = sorted(image_items, key=lambda item: item.offsets[0][0])
         position_segments = []
         st = 0
@@ -597,7 +622,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         assert all(isinstance(modality, Modality) for modality in modality_list)
 
         mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
-            spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+            spatial_merge_size=self._spatial_merge_size,
             image_token_id=self.mm_tokens.image_token_id,
             video_token_id=self.mm_tokens.video_token_id,
             vision_start_token_id=self.vision_start_token_id,
@@ -615,9 +640,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             position_id_per_seconds=getattr(
                 self.hf_config, "position_id_per_seconds", None
             ),
-            tokens_per_second=getattr(
-                self.hf_config.vision_config, "tokens_per_second", None
-            ),
+            tokens_per_second=self._tokens_per_second,
         )
         mrope_positions = mrope_positions.squeeze(1)
 
@@ -765,14 +788,12 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                 )
         if mrope_result is None:
             mrope_result = MRotaryEmbedding.get_rope_index(
-                spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+                spatial_merge_size=self._spatial_merge_size,
                 image_token_id=self.mm_tokens.image_token_id,
                 video_token_id=self.mm_tokens.video_token_id,
                 vision_start_token_id=self.vision_start_token_id,
                 model_type=self.model_type,
-                tokens_per_second=getattr(
-                    self.hf_config.vision_config, "tokens_per_second", None
-                ),
+                tokens_per_second=self._tokens_per_second,
                 # use the expanded token ids
                 input_ids=input_ids.unsqueeze(0),
                 image_grid_thw=image_grid_thw,

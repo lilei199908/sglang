@@ -100,7 +100,7 @@ _PEER_STATE_POLL_INTERVAL_SEC = 0.01
 
 
 def _get_process_group_backend(process_group, device: str):
-    return process_group._get_backend(torch.device(device))
+    return process_group
 
 
 def _iter_live_parallel_groups() -> Iterator[parallel_state.GroupCoordinator]:
@@ -141,7 +141,7 @@ def _maybe_create_message_queue(group) -> None:
 def _refresh_ep_members() -> None:
     from sglang.srt.layers.moe.token_dispatcher.mooncake import EPBuffer
 
-    EPBuffer._buffer.update_ep_member()
+    EPBuffer.get_existing_buffer().update_ep_member()
 
 
 def try_recover_ranks(global_ranks: List[int]) -> bool:
